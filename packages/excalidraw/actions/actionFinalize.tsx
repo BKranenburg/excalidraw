@@ -82,7 +82,10 @@ export const actionFinalize = register<FormData>({
         app.scene,
       );
 
-      if (isBindingElement(element)) {
+      if (
+        isBindingElement(element) &&
+        !appState.selectedLinearElement.segmentMidPointHoveredCoords
+      ) {
         const newArrow = !!appState.newElement;
 
         const selectedPointsIndices =
@@ -95,7 +98,10 @@ export const actionFinalize = register<FormData>({
             map.set(index, {
               point: LinearElementEditor.pointFromAbsoluteCoords(
                 element,
-                pointFrom<GlobalPoint>(sceneCoords.x, sceneCoords.y),
+                pointFrom<GlobalPoint>(
+                  sceneCoords.x - linearElementEditor.pointerOffset.x,
+                  sceneCoords.y - linearElementEditor.pointerOffset.y,
+                ),
                 elementsMap,
               ),
             });
@@ -103,11 +109,19 @@ export const actionFinalize = register<FormData>({
             return map;
           }, new Map()) ?? new Map();
 
-        bindOrUnbindBindingElement(element, draggedPoints, scene, appState, {
-          newArrow,
-          altKey: event.altKey,
-          angleLocked: shouldRotateWithDiscreteAngle(event),
-        });
+        bindOrUnbindBindingElement(
+          element,
+          draggedPoints,
+          sceneCoords.x - linearElementEditor.pointerOffset.x,
+          sceneCoords.y - linearElementEditor.pointerOffset.y,
+          scene,
+          appState,
+          {
+            newArrow,
+            altKey: event.altKey,
+            angleLocked: shouldRotateWithDiscreteAngle(event),
+          },
+        );
       } else if (isLineElement(element)) {
         if (
           appState.selectedLinearElement?.isEditing &&
@@ -162,6 +176,7 @@ export const actionFinalize = register<FormData>({
                     ...linearElementEditor.initialState,
                     lastClickedPoint: -1,
                   },
+                  pointerOffset: { x: 0, y: 0 },
                 },
             selectionElement: null,
             suggestedBinding: null,

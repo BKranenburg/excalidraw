@@ -42,6 +42,7 @@ import type {
   NullableGridSize,
   Zoom,
 } from "@excalidraw/excalidraw/types";
+import type { Bounds } from "@excalidraw/common";
 
 import {
   calculateFixedPointForNonElbowArrowBinding,
@@ -68,7 +69,6 @@ import { isLineElement } from "./typeChecks";
 
 import type { Scene } from "./Scene";
 
-import type { Bounds } from "./bounds";
 import type {
   NonDeleted,
   ExcalidrawLinearElement,
@@ -149,6 +149,8 @@ export class LinearElementEditor {
   public readonly pointerOffset: Readonly<{ x: number; y: number }>;
   public readonly hoverPointIndex: number;
   public readonly segmentMidPointHoveredCoords: GlobalPoint | null;
+  public readonly hoveredFocusPointBinding: "start" | "end" | null;
+  public readonly draggedFocusPointBinding: "start" | "end" | null;
   public readonly elbowed: boolean;
   public readonly customLineAngle: number | null;
   public readonly isEditing: boolean;
@@ -194,6 +196,8 @@ export class LinearElementEditor {
     };
     this.hoverPointIndex = -1;
     this.segmentMidPointHoveredCoords = null;
+    this.hoveredFocusPointBinding = null;
+    this.draggedFocusPointBinding = null;
     this.elbowed = isElbowArrow(element) && element.elbowed;
     this.customLineAngle = null;
     this.isEditing = isEditing;
@@ -343,6 +347,8 @@ export class LinearElementEditor {
       [idx],
       deltaX,
       deltaY,
+      scenePointerX,
+      scenePointerY,
       elementsMap,
       element,
       elements,
@@ -498,7 +504,6 @@ export class LinearElementEditor {
         width + pivotPoint[0],
         height + pivotPoint[1],
       );
-
       deltaX = target[0] - draggingPoint[0];
       deltaY = target[1] - draggingPoint[1];
     } else {
@@ -519,6 +524,8 @@ export class LinearElementEditor {
       selectedPointsIndices,
       deltaX,
       deltaY,
+      scenePointerX,
+      scenePointerY,
       elementsMap,
       element,
       elements,
@@ -721,7 +728,6 @@ export class LinearElementEditor {
           ? [pointerDownState.lastClickedPoint]
           : selectedPointsIndices,
       isDragging: false,
-      pointerOffset: { x: 0, y: 0 },
       customLineAngle: null,
       initialState: {
         ...editingLinearElement.initialState,
@@ -2066,6 +2072,8 @@ const pointDraggingUpdates = (
   selectedPointsIndices: readonly number[],
   deltaX: number,
   deltaY: number,
+  scenePointerX: number,
+  scenePointerY: number,
   elementsMap: NonDeletedSceneElementsMap,
   element: NonDeleted<ExcalidrawLinearElement>,
   elements: readonly Ordered<NonDeletedExcalidrawElement>[],
@@ -2106,6 +2114,8 @@ const pointDraggingUpdates = (
   const { start, end } = getBindingStrategyForDraggingBindingElementEndpoints(
     element,
     naiveDraggingPoints,
+    scenePointerX,
+    scenePointerY,
     elementsMap,
     elements,
     app.state,
@@ -2126,6 +2136,63 @@ const pointDraggingUpdates = (
           ? end.element
           : null,
       },
+    };
+  }
+
+  // Handle the case where neither endpoint is being dragged
+  // but we need to update bound endpoints
+  if (!startIsDragged && !endIsDragged) {
+    const nextArrow = {
+      ...element,
+      points: element.points.map((p, idx) => {
+        return naiveDraggingPoints.get(idx)?.point ?? p;
+      }),
+    };
+    const positions = new Map(naiveDraggingPoints);
+
+    if (element.startBinding) {
+      const startBindable = elementsMap.get(element.startBinding.elementId) as
+        | ExcalidrawBindableElement
+        | undefined;
+      if (startBindable) {
+        const startPoint =
+          updateBoundPoint(
+            nextArrow,
+            "startBinding",
+            element.startBinding,
+            startBindable,
+            elementsMap,
+          ) ?? null;
+        if (startPoint) {
+          positions.set(0, { point: startPoint, isDragging: true });
+        }
+      }
+    }
+
+    if (element.endBinding) {
+      const endBindable = elementsMap.get(element.endBinding.elementId) as
+        | ExcalidrawBindableElement
+        | undefined;
+      if (endBindable) {
+        const endPoint =
+          updateBoundPoint(
+            nextArrow,
+            "endBinding",
+            element.endBinding,
+            endBindable,
+            elementsMap,
+          ) ?? null;
+        if (endPoint) {
+          positions.set(element.points.length - 1, {
+            point: endPoint,
+            isDragging: true,
+          });
+        }
+      }
+    }
+
+    return {
+      positions,
     };
   }
 
@@ -2228,9 +2295,14 @@ const pointDraggingUpdates = (
   // We need to use a custom intersector to ensure that if there is a big "jump"
   // in the arrow's position, we can position it with outline avoidance
   // pixel-perfectly and avoid "dancing" arrows.
-  const customIntersector =
+  // NOTE: Direction matters here, so we create two intersectors
+  const startCustomIntersector =
     start.focusPoint && end.focusPoint
       ? lineSegment(start.focusPoint, end.focusPoint)
+      : undefined;
+  const endCustomIntersector =
+    start.focusPoint && end.focusPoint
+      ? lineSegment(end.focusPoint, start.focusPoint)
       : undefined;
 
   // Needed to handle a special case where an existing arrow is dragged over
@@ -2268,7 +2340,9 @@ const pointDraggingUpdates = (
         nextArrow.endBinding,
         endBindable,
         elementsMap,
-        customIntersector,
+        {
+          customIntersector: endCustomIntersector,
+        },
       ) || nextArrow.points[nextArrow.points.length - 1]
     : nextArrow.points[nextArrow.points.length - 1];
 
@@ -2291,7 +2365,7 @@ const pointDraggingUpdates = (
       : startIsDraggingOverEndElement &&
         app.state.bindMode !== "inside" &&
         getFeatureFlag("COMPLEX_BINDINGS")
-      ? nextArrow.points[nextArrow.points.length - 1]
+      ? endLocalPoint
       : startBindable
       ? updateBoundPoint(
           element,
@@ -2299,15 +2373,18 @@ const pointDraggingUpdates = (
           nextArrow.startBinding,
           startBindable,
           elementsMap,
-          customIntersector,
+          { customIntersector: startCustomIntersector },
         ) || nextArrow.points[0]
       : nextArrow.points[0];
 
   const endChanged =
-    pointDistance(
-      endLocalPoint,
-      nextArrow.points[nextArrow.points.length - 1],
-    ) !== 0;
+    !startIsDraggingOverEndElement &&
+    !(
+      endIsDraggingOverStartElement &&
+      app.state.bindMode !== "inside" &&
+      getFeatureFlag("COMPLEX_BINDINGS")
+    ) &&
+    !!endBindable;
   const startChanged =
     pointDistance(startLocalPoint, nextArrow.points[0]) !== 0;
 
@@ -2321,13 +2398,7 @@ const pointDraggingUpdates = (
   const indices = Array.from(indicesSet);
 
   return {
-    updates:
-      updates.startBinding || updates.suggestedBinding
-        ? {
-            startBinding: updates.startBinding,
-            suggestedBinding: updates.suggestedBinding,
-          }
-        : undefined,
+    updates,
     positions: new Map(
       indices.map((idx) => {
         return [
